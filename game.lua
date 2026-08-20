@@ -7944,7 +7944,8 @@ function Game:extend_shop_offers_to_slot_count()
     local guard_limit = math.max(250, slots * 125)
     local seen_ids = {}
     for _, offer in ipairs(self.shop_offers) do
-        if (offer.kind == nil or offer.kind == "joker") and offer.id then
+        -- Consumables count too: extending a shop must not repeat what is already out.
+        if offer.kind ~= "playing_card" and offer.id then
             seen_ids[offer.id] = true
         end
     end
@@ -8025,11 +8026,17 @@ function Game:extend_shop_offers_to_slot_count()
             if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
             self.shop_offers[#self.shop_offers + 1] = entry
         else
-            if (not allow_duplicates) and self:_shop_consumable_owned(entry.id) then
-                -- Owned: consume queue slot, no visible offer.
-            else
+            -- A consumable already on the shelf is in play too (`card.lua:349-354`), so it
+            -- cannot fill a second slot. `seen_ids` is what the joker branch above uses.
+            local dup = false
+            if not allow_duplicates then
+                dup = self:_shop_consumable_owned(entry.id)
+                    or (entry.id ~= nil and seen_ids[entry.id] == true)
+            end
+            if not dup then
                 if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
                 self.shop_offers[#self.shop_offers + 1] = entry
+                if entry.id ~= nil then seen_ids[entry.id] = true end
             end
         end
     end
@@ -8171,11 +8178,17 @@ function Game:roll_shop_offers()
             if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
             self.shop_offers[#self.shop_offers + 1] = entry
         else
-            if (not allow_duplicates) and self:_shop_consumable_owned(entry.id) then
-                -- Owned: consume queue slot, no visible offer.
-            else
-            if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
+            -- A consumable already on the shelf is in play too (`card.lua:349-354`), so it
+            -- cannot fill a second slot. `seen_ids` is what the joker branch above uses.
+            local dup = false
+            if not allow_duplicates then
+                dup = self:_shop_consumable_owned(entry.id)
+                    or (entry.id ~= nil and seen_ids[entry.id] == true)
+            end
+            if not dup then
+                if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
                 self.shop_offers[#self.shop_offers + 1] = entry
+                if entry.id ~= nil then seen_ids[entry.id] = true end
             end
         end
     end
@@ -8432,9 +8445,10 @@ function Game:_booster_destroy_choice_nodes()
     sess.choice_nodes = {}
 end
 
-function Game:_shop_pick_unique_consumable_ids(wanted_kind, count)
+--- Ids of one kind a draw may offer. Culls what is in play (`common_events.lua:1987`);
+--- Showman lifts the cull.
+function Game:_consumable_pool_ids(wanted_kind, ignore_cull)
     local pool = {}
-    local allow_duplicates = self:hasJoker("j_ring_master")
     if not CONSUMABLE_DEFS then return pool end
     for id, def in pairs(CONSUMABLE_DEFS) do
         if type(def) == "table" and type(id) == "string" and def.kind == wanted_kind then
@@ -8446,25 +8460,57 @@ function Game:_shop_pick_unique_consumable_ids(wanted_kind, count)
             if wanted_kind == "planet" and not self:planet_consumable_unlocked(id, def) then
                 incl = false
             end
+            if incl and not ignore_cull and self:_shop_consumable_owned(id) then
+                incl = false
+            end
             if incl then
                 pool[#pool + 1] = id
             end
         end
     end
+    -- Sorted: `pairs` order is not stable, and a seed must draw the same card every time.
     table.sort(pool)
-    local out = {}
-    if allow_duplicates then
-        for _ = 1, count do
-            if #pool == 0 then break end
-            local idx = self:_shop_rand_int(1, #pool)
-            out[#out + 1] = pool[idx]
-        end
-        return out
+    return pool
+end
+
+--- One pool shared by every slot of a pack, so a pack cannot offer the same centre twice.
+function Game:_new_pack_pool(wanted_kind)
+    local allow_duplicates = self:hasJoker("j_ring_master")
+    local ids = self:_consumable_pool_ids(wanted_kind, allow_duplicates)
+    -- Holding most of a kind can cull the pool empty; an empty pack is worse than a
+    -- duplicate, so drop the cull instead (`common_events.lua:2038-2043`).
+    if #ids == 0 and not allow_duplicates then
+        ids = self:_consumable_pool_ids(wanted_kind, true)
     end
-    for _ = 1, math.min(count, #pool) do
-        if #pool == 0 then break end
-        local idx = self:_shop_rand_int(1, #pool)
-        out[#out + 1] = table.remove(pool, idx)
+    return { ids = ids, allow_duplicates = allow_duplicates }
+end
+
+--- Takes one id from a pack pool. `forced` (Telescope) skips the draw and still consumes the
+--- id, so a later slot cannot repeat it.
+function Game:_pack_pool_take(pool, forced)
+    if not pool then return nil end
+    local ids = pool.ids
+    if forced then
+        if not pool.allow_duplicates then
+            for i = #ids, 1, -1 do
+                if ids[i] == forced then table.remove(ids, i) end
+            end
+        end
+        return forced
+    end
+    if #ids == 0 then return nil end
+    local idx = self:_shop_rand_int(1, #ids)
+    if pool.allow_duplicates then return ids[idx] end
+    return table.remove(ids, idx)
+end
+
+function Game:_shop_pick_unique_consumable_ids(wanted_kind, count)
+    local pool = self:_new_pack_pool(wanted_kind)
+    local out = {}
+    for _ = 1, count do
+        local id = self:_pack_pool_take(pool)
+        if not id then break end
+        out[#out + 1] = id
     end
     return out
 end
@@ -8506,6 +8552,7 @@ function Game:_booster_build_choices(offer)
     local choices = {}
     local n = math.max(1, math.floor(tonumber(offer.card_count) or 3))
     local pack = offer.pack
+    local rare_spectral_placed = {}
     local function maybe_replace_with_rare_spectral(base_kind, def_copy)
         if type(def_copy) ~= "table" then return base_kind, def_copy end
         local soul_def = CONSUMABLE_DEFS and CONSUMABLE_DEFS.spectral_soul
@@ -8513,74 +8560,82 @@ function Game:_booster_build_choices(offer)
 
         local can_soul = (pack == "arcana" or pack == "spectral")
         local can_black_hole = (pack == "celestial" or pack == "spectral")
+        -- Gated on what is in play (`common_events.lua:2090-2097`): no rolling the same rare
+        -- twice in one pack, none you already hold.
+        local allow_duplicates = self:hasJoker("j_ring_master")
+        local function blocked(id)
+            if allow_duplicates then return false end
+            return rare_spectral_placed[id] or self:_shop_consumable_owned(id)
+        end
 
         -- 0.3% chance each per card slot (replacement behavior).
-        if can_black_hole and black_hole_def and self:_shop_rand_int(1, 1000) <= 3 then
+        if can_black_hole and black_hole_def and not blocked("spectral_black_hole")
+            and self:_shop_rand_int(1, 1000) <= 3 then
             local c = copy_table and copy_table(black_hole_def) or nil
             if c then
                 c.id = "spectral_black_hole"
+                rare_spectral_placed["spectral_black_hole"] = true
                 return "spectral", c
             end
         end
-        if can_soul and soul_def and self:_shop_rand_int(1, 1000) <= 3 then
+        if can_soul and soul_def and not blocked("spectral_soul")
+            and self:_shop_rand_int(1, 1000) <= 3 then
             local c = copy_table and copy_table(soul_def) or nil
             if c then
                 c.id = "spectral_soul"
+                rare_spectral_placed["spectral_soul"] = true
                 return "spectral", c
             end
         end
         return base_kind, def_copy
     end
 
+    local function consumable_choice(kind, id)
+        local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[id]
+        if type(def) ~= "table" or not copy_table then return end
+        local c = copy_table(def)
+        c.id = id
+        local out_kind, out_def = maybe_replace_with_rare_spectral(kind, c)
+        choices[#choices + 1] = { kind = out_kind, consumable_def = out_def, taken = false }
+    end
+
     if pack == "arcana" then
-        local ids = self:_shop_pick_unique_consumable_ids("tarot", n)
-        for _, id in ipairs(ids) do
-            local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[id]
-            if type(def) == "table" and copy_table then
-                local c = copy_table(def)
-                c.id = id
-                local kind0, def0 = "tarot", c
-                if self:has_voucher("v_omen_globe") and self:_shop_rand_int(1, 4) == 1 then
-                    local sids = self:_shop_pick_unique_consumable_ids("spectral", 1)
-                    local sid = sids and sids[1]
-                    local sd = sid and CONSUMABLE_DEFS[sid]
-                    if type(sd) == "table" then
-                        local sc = copy_table(sd)
-                        sc.id = sid
-                        kind0, def0 = "spectral", sc
-                    end
-                end
-                local kind, out_def = maybe_replace_with_rare_spectral(kind0, def0)
-                choices[#choices + 1] = { kind = kind, consumable_def = out_def, taken = false }
+        local tarots = self:_new_pack_pool("tarot")
+        -- Shared, so Omen Globe cannot put the same Spectral in two slots.
+        local spectrals = nil
+        for _ = 1, n do
+            local kind, id = "tarot", nil
+            if self:has_voucher("v_omen_globe") and self:_shop_rand_int(1, 4) == 1 then
+                spectrals = spectrals or self:_new_pack_pool("spectral")
+                id = self:_pack_pool_take(spectrals)
+                if id then kind = "spectral" end
             end
+            if not id then
+                kind, id = "tarot", self:_pack_pool_take(tarots)
+            end
+            if not id then break end
+            consumable_choice(kind, id)
         end
     elseif pack == "celestial" then
-        local ids = self:_shop_pick_unique_consumable_ids("planet", n)
-        if self:has_voucher("v_telescope") and #ids > 0 then
-            local pref = self:_planet_consumable_id_for_most_played_hand()
-            if pref and CONSUMABLE_DEFS[pref] then
-                ids[1] = pref
-            end
+        local pool = self:_new_pack_pool("planet")
+        local pref = nil
+        if self:has_voucher("v_telescope") then
+            pref = self:_planet_consumable_id_for_most_played_hand()
+            if pref and not (CONSUMABLE_DEFS and CONSUMABLE_DEFS[pref]) then pref = nil end
         end
-        for _, id in ipairs(ids) do
-            local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[id]
-            if type(def) == "table" and copy_table then
-                local c = copy_table(def)
-                c.id = id
-                local kind, out_def = maybe_replace_with_rare_spectral("planet", c)
-                choices[#choices + 1] = { kind = kind, consumable_def = out_def, taken = false }
-            end
+        for i = 1, n do
+            -- Forcing consumes the planet, so later slots cannot repeat it.
+            local forced = (i == 1) and pref or nil
+            local id = self:_pack_pool_take(pool, forced)
+            if not id then break end
+            consumable_choice("planet", id)
         end
     elseif pack == "spectral" then
-        local ids = self:_shop_pick_unique_consumable_ids("spectral", n)
-        for _, id in ipairs(ids) do
-            local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[id]
-            if type(def) == "table" and copy_table then
-                local c = copy_table(def)
-                c.id = id
-                local kind, out_def = maybe_replace_with_rare_spectral("spectral", c)
-                choices[#choices + 1] = { kind = kind, consumable_def = out_def, taken = false }
-            end
+        local pool = self:_new_pack_pool("spectral")
+        for _ = 1, n do
+            local id = self:_pack_pool_take(pool)
+            if not id then break end
+            consumable_choice("spectral", id)
         end
     elseif pack == "buffoon" then
         local entries = self:_shop_pick_unique_joker_ids(n)
