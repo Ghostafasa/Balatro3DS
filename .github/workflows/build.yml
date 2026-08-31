@@ -26,8 +26,7 @@ jobs:
           echo "Downloading: $asset_url"
           curl -L -o lovepotion.zip "$asset_url"
           unzip lovepotion.zip -d extracted
-          NDIR=$(find extracted -maxdepth 1 -type d -name "Nintendo.3DS-*")
-          echo "NDIR=$GITHUB_WORKSPACE/lovepotion_dl/$NDIR" >> $GITHUB_ENV
+          echo "NDIR=$GITHUB_WORKSPACE/lovepotion_dl/extracted" >> $GITHUB_ENV
 
       - name: Clone LovePotion source (for romfs)
         run: git clone --depth 1 https://github.com/lovebrew/lovepotion.git lovepotion_src
