@@ -6080,7 +6080,7 @@ function Game:recompute_consumable_slot_layout()
 end
 
 function Game:joker_base_capacity() 
-    local base = 5
+    local base = 10
     if self:has_voucher("v_antimatter") then
         base = base + 1
     end
