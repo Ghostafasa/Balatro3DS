@@ -203,8 +203,8 @@ function Game:init(seed)
 
     -- Run Consumables (Tarot / Planet cards held outside the deck).
     self.consumables = {}
-    self.consumable_base_capacity = 2
-    self.consumable_capacity = 2
+    self.consumable_base_capacity = 5
+    self.consumable_capacity = 5
     self._consumable_rects = {}
     self.consumable_nodes = {}
     self.tarots_used = 0
@@ -3655,7 +3655,7 @@ end
 
 --- Base slots + deck/voucher bonuses + one extra slot per owned Negative consumable (same model as jokers).
 function Game:get_effective_consumable_capacity()
-    local cap = self.consumable_base_capacity or 2
+    local cap = self.consumable_base_capacity or 5
     cap = cap + (self.deck_consumable_slots or 0)
     if self:has_voucher("v_crystal_ball") then
         cap = cap + 1
@@ -6080,7 +6080,7 @@ function Game:recompute_consumable_slot_layout()
 end
 
 function Game:joker_base_capacity() 
-    local base = 10
+    local base = 20
     if self:has_voucher("v_antimatter") then
         base = base + 1
     end
