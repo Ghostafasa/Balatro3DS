@@ -1,0 +1,66 @@
+name: Build 3DSX
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install helper tools
+        run: apt-get update && apt-get install -y zip unzip curl jq rsync
+
+      - name: Download latest LovePotion 3DS release
+        run: |
+          mkdir -p lovepotion_dl
+          cd lovepotion_dl
+          asset_url=$(curl -s https://api.github.com/repos/lovebrew/lovepotion/releases/latest \
+            | jq -r '.assets[] | select(.name | test("Nintendo.3DS-.*\\.zip")) | .browser_download_url')
+          echo "Downloading: $asset_url"
+          curl -L -o lovepotion.zip "$asset_url"
+          unzip lovepotion.zip -d extracted
+          NDIR=$(find extracted -maxdepth 1 -type d -name "Nintendo.3DS-*")
+          echo "NDIR=$GITHUB_WORKSPACE/lovepotion_dl/$NDIR" >> $GITHUB_ENV
+
+      - name: Clone LovePotion source (for romfs)
+        run: git clone --depth 1 https://github.com/lovebrew/lovepotion.git lovepotion_src
+
+      - name: Prepare game folder
+        run: |
+          mkdir -p build/game
+          rsync -a --exclude='.git' --exclude='.github' --exclude='build' --exclude='lovepotion_dl' --exclude='lovepotion_src' ./ build/game/
+
+      - name: Convert images and fonts
+        run: |
+          find ./build/game -type f -name "*.png" -exec sh -c 'tex3ds -f rgba "$0" -o "${0%.png}.t3x" && rm "$0"' {} \;
+          find ./build/game -type f -name "*.ttf" -exec sh -c 'mkbcfnt "$0" -o "${0%.ttf}.bcfnt" && rm "$0"' {} \;
+
+      - name: Create SMDH metadata
+        run: |
+          smdhtool --create "Balatro3DS" "A Remake of Balatro for the 3DS" "Gazpacho" ./resources/textures/1x/icon.png ./build/metadata.smdh
+
+      - name: Build base 3dsx stub
+        run: |
+          3dsxtool "$NDIR/lovepotion.elf" ./build/base.3dsx --smdh=./build/metadata.smdh --romfs=./lovepotion_src/platform/ctr/romfs
+
+      - name: Package game content as .love
+        run: |
+          cd build/game
+          zip -r -9 ../balatro.love .
+
+      - name: Fuse final .3dsx
+        run: |
+          cat build/base.3dsx build/balatro.love > Balatro3DS.3dsx
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Balatro3DS-3dsx
+          path: Balatro3DS.3dsx
